@@ -1,0 +1,14 @@
+{
+  "name": "sparkboard-assistant",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Assistant service for SparkBoard — turns a sentence into SparkBoard commands.",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": { "start": "node index.js" },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.71.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.2"
+  }
+}

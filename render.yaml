@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: sparkboard-assistant
+    runtime: node
+    plan: free
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false            # paste your key in the Render dashboard
+      - key: MODEL
+        value: claude-opus-5
+      - key: ALLOWED_ORIGINS
+        value: "*"             # tighten to your site once you know its address
+      - key: MAX_PER_MINUTE
+        value: "20"
+      - key: APP_TOKEN
+        sync: false            # optional shared secret; leave blank to skip
