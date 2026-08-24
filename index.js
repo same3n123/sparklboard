@@ -24,6 +24,8 @@ const MODEL = process.env.MODEL || 'claude-sonnet-5';
 const ORIGINS = (process.env.ALLOWED_ORIGINS || '*').split(',').map(s => s.trim());
 /* Optional shared secret — if set, the page must send it as X-App-Token */
 const APP_TOKEN = process.env.APP_TOKEN || '';
+/* low is noticeably quicker and fine for this job; medium reasons a bit harder */
+const EFFORT = process.env.EFFORT || 'medium';
 
 if (!process.env.ANTHROPIC_API_KEY)
   console.warn('ANTHROPIC_API_KEY is not set — /api/assistant will fail.');
@@ -267,9 +269,11 @@ app.post('/api/assistant', async (req, res) => {
        via stop_reason, just without an automatic retry on another model. */
     const r = await client.messages.create({
       model: MODEL,
-      max_tokens: 2000,
+      /* Thinking tokens count against max_tokens. At 2000 a longer think left
+         no room for the JSON, which came back truncated — a reply like ":ic". */
+      max_tokens: 8000,
       system: [{ type: 'text', text: SYSTEM, cache_control: { type: 'ephemeral' } }],
-      output_config: { effort: 'medium', format: { type: 'json_schema', schema: SCHEMA } },
+      output_config: { effort: EFFORT, format: { type: 'json_schema', schema: SCHEMA } },
       messages: history.concat([{
         role: 'user',
         content: 'THIS IS THEIR CANVAS RIGHT NOW\n' +
@@ -288,12 +292,23 @@ app.post('/api/assistant', async (req, res) => {
     const text = (r.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
     let out = null;
     try { out = JSON.parse(text); } catch (e) { out = null; }
-    if (!out) return res.json({
-      reply: "I couldn't work that one out.",
-      bullets: ['Try naming a part directly — "add a motor" or "wire the LED to the Arduino".',
-                'Or ask "what is missing?" and I will read the canvas myself.'],
-      actions: []
-    });
+
+    /* A truncated answer is worse than none: half a JSON string parses as
+       nothing, or worse, as a fragment. Say plainly that it was cut short. */
+    if (!out || typeof out.reply !== 'string' || out.reply.trim().length < 4){
+      console.error('unusable reply (stop_reason=' + r.stop_reason + '):',
+                    JSON.stringify(text).slice(0, 400));
+      const cut = r.stop_reason === 'max_tokens';
+      return res.json({
+        reply: cut ? 'That answer ran too long and got cut off — ask me again, more simply.'
+                   : "I couldn't work that one out.",
+        bullets: cut
+          ? ['Shorter questions work better — "why is the LED off?" rather than a paragraph.']
+          : ['Try naming a part directly — "add a motor" or "wire the LED to the Arduino".',
+             'Or ask "what is missing?" and I will read the canvas myself.'],
+        actions: []
+      });
+    }
 
     res.json({
       reply: String(out.reply || '').slice(0, 700),
@@ -308,5 +323,17 @@ app.post('/api/assistant', async (req, res) => {
     res.status(err && err.status === 429 ? 429 : 502).json({ error: plainError(err) });
   }
 });
+
+/* Render's free plan sleeps a service after 15 minutes idle, and waking it costs
+   the learner a ~50 second wait on their next question. A quiet self-ping keeps
+   it up. One always-on service fits inside the free monthly hours; set
+   KEEP_AWAKE=off if you would rather let it sleep. */
+const SELF = process.env.RENDER_EXTERNAL_URL || '';
+if (SELF && process.env.KEEP_AWAKE !== 'off'){
+  setInterval(() => {
+    fetch(SELF + '/health').catch(() => {});
+  }, 12 * 60 * 1000).unref?.();
+  console.log('keep-awake ping every 12 min to ' + SELF);
+}
 
 app.listen(PORT, () => console.log('SparkBoard assistant listening on ' + PORT));
