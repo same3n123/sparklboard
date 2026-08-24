@@ -24,8 +24,9 @@ const MODEL = process.env.MODEL || 'claude-sonnet-5';
 const ORIGINS = (process.env.ALLOWED_ORIGINS || '*').split(',').map(s => s.trim());
 /* Optional shared secret — if set, the page must send it as X-App-Token */
 const APP_TOKEN = process.env.APP_TOKEN || '';
-/* low is noticeably quicker and fine for this job; medium reasons a bit harder */
-const EFFORT = process.env.EFFORT || 'medium';
+/* low is noticeably quicker and fine for this job — translating a sentence into
+   actions is not deep reasoning. Set EFFORT=medium or high to think harder. */
+const EFFORT = process.env.EFFORT || 'low';
 
 if (!process.env.ANTHROPIC_API_KEY)
   console.warn('ANTHROPIC_API_KEY is not set — /api/assistant will fail.');
@@ -97,6 +98,7 @@ const GRAMMAR = [
   '  wire          two parts, electrically            "led to the arduino"',
   '  pin           ONE wire, both ends named          "U1.13 to LED1.anode"',
   '  unpin         take ONE wire out again            "U1.13 to LED1.anode"',
+  '  mount         ONE mechanical joint, points named "PR1.bore to M1.shaft"',
   '  connect_all   (nothing)                          ""',
   '  finish        (nothing) adds driver/battery,     ""',
   '                wires the rest, gives a first step',
@@ -164,6 +166,22 @@ const GRAMMAR = [
   '                       motor, battery -> driver power. Use "finish" if a driver is missing.',
   '  Ultrasonic:          5V -> VCC, GND -> GND, a digital pin -> TRIG, another -> ECHO.',
   '',
+  'BOLTING THINGS TOGETHER (mechanical, not electrical)',
+  'Parts bolt together at POINTS, and the canvas below lists them with their role and kind,',
+  'like "bore(plug:shaft)" or "shaft(shaft:shaft)". The rule is simple:',
+  '',
+  '  a PLUG goes into a SOCKET, or onto a SHAFT, of THE SAME KIND.',
+  '',
+  'So PR1.bore(plug:shaft) fits M1.shaft(shaft:shaft) — same kind, plug into shaft. It does',
+  'NOT fit CH1.left_motor_mount(socket:motor-mount), because the kinds differ.',
+  'Use "mount" when you know both points: {"op":"mount","text":"PR1.bore to M1.shaft"}',
+  'Use "connect" when you just mean two parts and will let the app pick the points.',
+  'A shaft carries MANY riders, so a gear, a wheel and a pulley can all share one axle.',
+  '',
+  'Worth knowing about this engine: a wheel or propeller mounts DIRECTLY on a motor shaft,',
+  'and an axle cannot mount on a motor at all. A motor reaches a chassis through a motor',
+  'mount, never directly.',
+  '',
   'THE SHORTCUTS, when you want them rather than instead of thinking:',
   '  "connect_all"  joins every pair that fits, using the app\'s own planner.',
   '  "finish"       adds a missing driver or battery and completes what is half-built.',
@@ -178,13 +196,28 @@ const GRAMMAR = [
   'something is close / it is loud / it is quiet / the button is pressed / motion is',
   'detected. Write the whole sentence, e.g. "when something is close turn on the buzzer".',
   '',
-  'PARTS YOU MAY NAME (use these everyday words):',
-  '  led, rgb led, buzzer, lcd, oled, motor, dc motor, servo, stepper, fan, propeller,',
-  '  wheel, caster, axle, gear, pulley, belt, chassis, platform, beam, bracket,',
-  '  motor mount, gripper, arm, hinge, lever, spring, crank, cam, linkage, conveyor,',
-  '  arduino, nano, esp32, breadboard, motor driver, l298n, a4988, relay, transistor,',
-  '  mosfet, diode, resistor, button, switch, potentiometer, joystick, keypad, rfid,',
-  '  battery, coin cell, battery pack, ldr, temperature sensor, ultrasonic, pir'
+  'PARTS YOU MAY NAME — use these names EXACTLY. They are matched word for word, so a',
+  'name you improvise ("9V battery pack", "LED light strip") lands on the wrong part or',
+  'on two parts at once.',
+  '',
+  '  POWER      9v battery      one rectangular 9V block',
+  '             battery pack    a holder of AA cells   (NOT the same as a 9v battery)',
+  '             coin cell       a 3V button cell',
+  '  BOARDS     arduino, nano, esp32, breadboard',
+  '  LIGHT      led             a single LED   (say "led", never "bulb" or "light")',
+  '             rgb led         the three-colour one',
+  '             lcd, oled       displays',
+  '  SOUND      buzzer',
+  '  MOVING     dc motor, servo, stepper, fan, propeller, wheel, caster, axle, gear,',
+  '             pulley, belt, chassis, platform, beam, bracket, motor mount, gripper,',
+  '             arm, hinge, lever, spring, crank, cam, linkage, conveyor',
+  '  DRIVING    motor driver (an L298N), a4988, relay, transistor, mosfet',
+  '  PASSIVE    resistor, diode, potentiometer',
+  '  INPUT      button, switch, joystick, keypad, rfid',
+  '  SENSING    ldr (light), temperature sensor, ultrasonic (distance), pir (motion)',
+  '',
+  'Say the count in words or digits — "two leds", "3 wheels". Do not repeat a name to mean',
+  'more than one.'
 ].join('\n');
 
 const SYSTEM = [
@@ -263,7 +296,8 @@ function snapshotText(c){
   lines.push(parts.length
     ? 'Parts on the canvas, with the pins each one really has:\n  ' +
       parts.map(p => (p.name || p.type) + ' (' + (p.type || '') + ')' +
-        (Array.isArray(p.pins) && p.pins.length ? '  pins: ' + p.pins.join(' ') : ''))
+        (Array.isArray(p.pins) && p.pins.length ? '  pins: ' + p.pins.join(' ') : '') +
+        (Array.isArray(p.points) && p.points.length ? '  points: ' + p.points.join(' ') : ''))
         .join('\n  ')
     : 'The canvas is empty.');
   if (Array.isArray(c.joined) && c.joined.length)
@@ -375,7 +409,7 @@ app.post('/api/assistant', async (req, res) => {
     res.json({
       reply: String(out.reply || '').slice(0, 700),
       bullets: (out.bullets || []).slice(0, 4).map(b => String(b).slice(0, 200)),
-      actions: (out.actions || []).slice(0, 10)
+      actions: (out.actions || []).slice(0, 24)
         .filter(a => a && a.op)
         .map(a => ({ op: String(a.op).toLowerCase().trim().slice(0, 24),
                      text: String(a.text || '').slice(0, 200) }))
