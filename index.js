@@ -19,14 +19,21 @@ import cors from 'cors';
 import Anthropic from '@anthropic-ai/sdk';
 
 const PORT = process.env.PORT || 3000;
+/* Sonnet 5 at effort:low is the balance point for this job: it is the cheapest
+   model that reliably reasons about a whole circuit loop, and unlike Haiku 4.5 it
+   accepts 'effort', so the cost knob exists. ~$5 per 1000 questions with the
+   system prompt cached. MODEL=claude-haiku-4-5 halves that if you want it. */
 const MODEL = process.env.MODEL || 'claude-sonnet-5';
 /* Comma-separated list of sites allowed to call this service, or * for any */
 const ORIGINS = (process.env.ALLOWED_ORIGINS || '*').split(',').map(s => s.trim());
 /* Optional shared secret — if set, the page must send it as X-App-Token */
 const APP_TOKEN = process.env.APP_TOKEN || '';
 /* low is noticeably quicker and fine for this job — translating a sentence into
-   actions is not deep reasoning. Set EFFORT=medium or high to think harder. */
+   actions is not deep reasoning. Set EFFORT=medium or high to think harder.
+   NOTE: effort is only understood by the 4.6-and-later families. Haiku 4.5 and
+   Sonnet 4.5 REJECT it with a 400, so it is left off the request for those. */
 const EFFORT = process.env.EFFORT || 'low';
+const EFFORT_OK = !/haiku|sonnet-4-5|-3-/i.test(MODEL);
 
 if (!process.env.ANTHROPIC_API_KEY)
   console.warn('ANTHROPIC_API_KEY is not set — /api/assistant will fail.');
@@ -338,7 +345,8 @@ app.get('/', (_req, res) => res.type('text').send([
   ''
 ].join('\n')));
 
-app.get('/health', (_req, res) => res.json({ ok: true, model: MODEL }));
+app.get('/health', (_req, res) =>
+  res.json({ ok: true, model: MODEL, effort: EFFORT_OK ? EFFORT : null }));
 
 app.post('/api/assistant', async (req, res) => {
   if (APP_TOKEN && req.get('X-App-Token') !== APP_TOKEN)
@@ -369,7 +377,9 @@ app.post('/api/assistant', async (req, res) => {
          no room for the JSON, which came back truncated — a reply like ":ic". */
       max_tokens: 8000,
       system: [{ type: 'text', text: SYSTEM, cache_control: { type: 'ephemeral' } }],
-      output_config: { effort: EFFORT, format: { type: 'json_schema', schema: SCHEMA } },
+      output_config: EFFORT_OK
+        ? { effort: EFFORT, format: { type: 'json_schema', schema: SCHEMA } }
+        : { format: { type: 'json_schema', schema: SCHEMA } },
       messages: history.concat([{
         role: 'user',
         content: 'THIS IS THEIR CANVAS RIGHT NOW\n' +
