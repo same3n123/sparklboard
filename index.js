@@ -57,11 +57,14 @@ const SCHEMA = {
   additionalProperties: false,
   required: ['reply', 'bullets', 'commands'],
   properties: {
+    /* No maxItems — structured outputs rejects it on arrays. The limits are
+       stated here in words and enforced for real when the reply is read. */
     reply:    { type: 'string', description: 'One short sentence to the learner.' },
-    bullets:  { type: 'array', maxItems: 4, items: { type: 'string' },
-                description: 'At most four short lines of reasoning or next steps.' },
-    commands: { type: 'array', maxItems: 8, items: { type: 'string' },
-                description: 'SparkBoard command sentences to run, in order. Empty for a pure answer.' }
+    bullets:  { type: 'array', items: { type: 'string' },
+                description: 'At most FOUR short lines of reasoning or next steps.' },
+    commands: { type: 'array', items: { type: 'string' },
+                description: 'At most EIGHT SparkBoard command sentences, in the order they ' +
+                             'should run. Empty for a pure answer.' }
   }
 };
 
@@ -152,6 +155,31 @@ function snapshotText(c){
   return lines.join('\n');
 }
 
+/* Anything that goes wrong upstream becomes one sentence a learner can read.
+   The raw API text is still in the Render log, where it belongs. */
+function plainError(err){
+  const msg = String((err && err.message) || '');
+  const code = (err && err.status) || 0;
+  if (/credit balance/i.test(msg))
+    return 'The assistant account is out of credit — a teacher needs to top it up.';
+  if (code === 401 || code === 403 || /authentication|api key/i.test(msg))
+    return 'The assistant service has no working key set up.';
+  if (code === 429)
+    return 'Too many questions at once — wait a few seconds and ask again.';
+  if (code >= 500)
+    return 'The assistant is busy right now. Try again in a moment.';
+  return 'The assistant could not answer that one.';
+}
+
+/* A plain word at the root, so opening the address in a browser says something. */
+app.get('/', (_req, res) => res.type('text').send([
+  'SparkBoard assistant is running.',
+  '',
+  'There is no home page here. Health check:  /health',
+  'SparkBoard talks to it at:                 POST /api/assistant',
+  ''
+].join('\n')));
+
 app.get('/health', (_req, res) => res.json({ ok: true, model: MODEL }));
 
 app.post('/api/assistant', async (req, res) => {
@@ -203,8 +231,7 @@ app.post('/api/assistant', async (req, res) => {
     });
   } catch (err) {
     console.error(err);
-    const status = err && err.status === 429 ? 429 : 502;
-    res.status(status).json({ error: (err && err.message) || 'The assistant service failed.' });
+    res.status(err && err.status === 429 ? 429 : 502).json({ error: plainError(err) });
   }
 });
 
