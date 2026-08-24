@@ -118,6 +118,25 @@ const GRAMMAR = [
   '  status        (nothing) reads the rule engine    ""',
   '  ideas         (nothing) suggests projects        ""',
   '',
+  'HOW WIRING ACTUALLY WORKS — READ THIS BEFORE EMITTING "wire"',
+  'You cannot see or choose pins. A "wire" action names two PARTS, and SparkBoard\'s own',
+  'planner decides which pin goes to which — it knows that an LED anode takes a digital',
+  'pin and its cathode goes to ground through a resistor, that an LDR needs a 10k divider,',
+  'that a motor must go through a driver. It is right about this and you are guessing.',
+  '',
+  'So DO NOT wire a circuit up pin by pin. A chain of "wire" actions fights the planner and',
+  'produces a tangle that does not work. Instead:',
+  '',
+  '  Building anything complete   -> "add" the parts, then ONE "connect_all".',
+  '  Something half-built         -> ONE "finish". It adds the missing driver or battery,',
+  '                                  completes the ground paths and gives it a first action.',
+  '  A known project              -> ONE "recipe". These are hand-built and always correct.',
+  '  ONE specific connection the  -> a single "wire" naming just those two parts.',
+  '  learner asked for by name',
+  '',
+  'Never emit more than two "wire" actions in one reply. If you are reaching for a third,',
+  'you want "connect_all" or "finish" instead.',
+  '',
   'WHOLE PROJECTS for op "recipe": night light, car, robot, alarm, fan, traffic light,',
   'door, thermometer, distance meter, blinker, button light, machine.',
   '',
@@ -163,7 +182,10 @@ const SYSTEM = [
   '  Answer properly instead — a question deserves a real answer, not an action.',
   '- Prefer one "recipe" action over ten small ones when they ask for a whole project.',
   '- After adding parts that belong together, add a "connect_all" or "finish" action so',
-  '  the build actually works rather than sitting in pieces.',
+  '  the build actually works rather than sitting in pieces. Never hand-wire it instead —',
+  '  see the wiring rule above; the planner knows the pins and you do not.',
+  '- The canvas below lists every wire that already exists, pin by pin. Read it before',
+  '  wiring anything: if the connection is already there, say so instead of repeating it.',
   '- If they greet you or ask what you can do, be welcoming: say in a sentence what you can',
   '  build together, and give two or three concrete ideas in bullets.',
   '- "bullets" is at most four short lines — the why, a number that matters, what to try',
@@ -208,7 +230,9 @@ function snapshotText(c){
     : 'The canvas is empty.');
   if (Array.isArray(c.joined) && c.joined.length)
     lines.push('Already bolted together: ' + c.joined.join('; '));
-  if (c.wires) lines.push('Wires: ' + c.wires);
+  if (Array.isArray(c.wired) && c.wired.length)
+    lines.push('Wires already made, pin to pin:\n  ' + c.wired.join('\n  '));
+  else if (c.wires) lines.push('Wires: ' + c.wires);
   if (Array.isArray(c.blocks) && c.blocks.length)
     lines.push('Blocks already made: ' + c.blocks.join(', '));
   if (c.status) lines.push('The page says: ' + c.status);
