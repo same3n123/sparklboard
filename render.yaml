@@ -3,7 +3,8 @@ services:
     name: sparkboard-assistant
     runtime: node
     plan: free
-    rootDir: server
+    # These files sit at the root of their own repo. If you instead push the
+    # whole SparkBoard project, add:  rootDir: server
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /health
@@ -11,7 +12,7 @@ services:
       - key: ANTHROPIC_API_KEY
         sync: false            # paste your key in the Render dashboard
       - key: MODEL
-        value: claude-opus-5
+        value: claude-sonnet-5
       - key: ALLOWED_ORIGINS
         value: "*"             # tighten to your site once you know its address
       - key: MAX_PER_MINUTE

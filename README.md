@@ -4,7 +4,7 @@ A ~200-line Express service that turns a learner's sentence into **SparkBoard co
 It is the only place an API key exists. The page never sees it.
 
 ```
-browser  ──POST /api/assistant──▶  this service  ──▶  Claude (claude-opus-5)
+browser  ──POST /api/assistant──▶  this service  ──▶  Claude (claude-sonnet-5)
    ▲                                     │
    └──── { reply, bullets, commands } ◀──┘
 ```
@@ -36,7 +36,7 @@ takes ~30 s to wake the service. Everything in SparkBoard keeps working while it
 | Variable | Required | Meaning |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | yes | Your Anthropic key. Never put this in `index.html`. |
-| `MODEL` | no | Defaults to `claude-opus-5`. |
+| `MODEL` | no | Defaults to `claude-sonnet-5`. |
 | `ALLOWED_ORIGINS` | no | Comma-separated sites allowed to call it. `*` by default; set it to your site's address once you have one. |
 | `APP_TOKEN` | no | A shared secret. If set, the page must send it — type `ai token <secret>` in the Assistant. |
 | `MAX_PER_MINUTE` | no | Requests per IP per minute. Default 20. |
