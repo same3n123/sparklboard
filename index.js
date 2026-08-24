@@ -87,7 +87,7 @@ const GRAMMAR = [
   '  stop the motor',
   '  reverse the motor',
   '  wait 2 seconds',
-  '  repeat forever',
+  '  repeat 3 times      (rarely useful — see the rule below)',
   '  when it gets dark turn on the led',
   '      other conditions: when it is bright / hot / cold / something is close /',
   '      it is loud / it is quiet / the button is pressed / motion is detected',
@@ -132,6 +132,8 @@ const SYSTEM = [
   '- Never invent part names or command forms that are not listed above. If what they want',
   '  is not possible here, say so in one sentence and offer the nearest thing that is.',
   '- Refer to what is already on their canvas (given below) instead of starting over.',
+  '- Never end with a repeat block. The sketch already loops forever, so a repeat that',
+  '  nobody asked for just lands on the canvas empty. Only emit one if they say "repeat".',
   '- Electrical truth matters: an LED always needs a series resistor, a DC motor needs a',
   '  driver rather than a bare board pin, and an LDR needs a 10k divider to read on an',
   '  analog pin. The page enforces this, but say why when it comes up.'
