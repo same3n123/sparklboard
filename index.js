@@ -4,13 +4,13 @@
    One endpoint. It takes the sentence a learner typed, plus a small
    read-only snapshot of their canvas, and returns:
 
-     { reply, bullets[], commands[] }
+     { reply, bullets[], actions[] }
 
-   `commands` are ordinary SparkBoard sentences — "add a motor",
-   "connect motor to chassis", "when it gets dark turn on the led".
-   The browser runs each one through the SAME deterministic interpreter a
-   typed command goes through, so the model never touches the canvas
-   directly and can never invent a connection the simulator would refuse.
+   Each action is { op, text } — the op names the operation outright, so no
+   interpreter has to guess at the model's English. The browser dispatches
+   each op straight to the block command that already exists, and those
+   commands still validate: the model never touches the canvas directly and
+   can never invent a connection the simulator would refuse.
 
    The API key lives here, in the environment, and never reaches the page.
    ===================================================================== */
@@ -55,7 +55,7 @@ function overLimit(ip){
 const SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['reply', 'bullets', 'commands'],
+  required: ['reply', 'bullets', 'actions'],
   properties: {
     /* No maxItems — structured outputs rejects it on arrays. The limits are
        stated here in words and enforced for real when the reply is read. */
@@ -66,43 +66,62 @@ const SCHEMA = {
     bullets:  { type: 'array', items: { type: 'string' },
                 description: 'At most FOUR extra lines — the why, the numbers, what to try ' +
                              'next. Leave empty when the reply already said everything.' },
-    commands: { type: 'array', items: { type: 'string' },
-                description: 'At most EIGHT SparkBoard command sentences, in the order they ' +
-                             'should run. Empty for a pure answer.' }
+    actions:  { type: 'array',
+                description: 'What to DO on the canvas, in order. Empty for a pure answer.',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['op', 'text'],
+                  properties: {
+                    op:   { type: 'string', description: 'The action name, from the OPS list.' },
+                    text: { type: 'string',
+                            description: 'The detail this op needs, in plain words — the part ' +
+                                         'names, the number, the condition. See each op.' }
+                  }
+                } }
   }
 };
 
 /* The command grammar the browser can actually execute. Anything outside
    this list is dropped by the page, so it is stated plainly here. */
 const GRAMMAR = [
-  'COMMANDS YOU MAY EMIT (each string must read like one of these):',
+  'THE OPS YOU MAY USE. Each action is {op, text}. The op decides what happens;',
+  'the text carries the detail. Nothing re-reads your English, so the op must be exact.',
   '',
-  '  add a <part>                  "add a motor", "add two wheels and a chassis"',
-  '  connect <part> to <part>      mechanical join   ("connect wheel to motor")',
-  '  wire <part> to <part>         electrical join   ("wire the led to the arduino")',
-  '  connect everything            joins every pair that fits',
-  '  finish it                     adds a missing driver/battery and wires the rest',
-  '  remove the <part>             deletes it',
-  '  detach the <part>             undoes a mechanical join',
-  '  unwire the <part>             removes its wires',
-  '  run the motor at 80%          sets a motor speed',
-  '  move the servo to 90 degrees  sets a servo angle',
-  '  turn on the led   /   turn off the buzzer',
-  '  stop the motor',
-  '  reverse the motor',
-  '  wait 2 seconds',
-  '  repeat 3 times      (rarely useful — see the rule below)',
-  '  when it gets dark turn on the led',
-  '      other conditions: when it is bright / hot / cold / something is close /',
-  '      it is loud / it is quiet / the button is pressed / motion is detected',
-  '  make a night light            whole project. Also: car, robot, alarm, fan,',
-  '                                traffic light, door, thermometer, distance meter',
-  '  tidy up                       organises the canvas',
-  '  run it                        starts the simulation',
-  '  stop the simulation',
-  '  undo',
-  '  what is missing?              reads the rule engine',
-  '  what should i build?',
+  '  op            text should say                    example text',
+  '  ----------------------------------------------------------------------------',
+  '  add           the part(s), with counts           "two wheels and a chassis"',
+  '  connect       two parts, mechanically            "wheel to motor"',
+  '  wire          two parts, electrically            "led to the arduino"',
+  '  connect_all   (nothing)                          ""',
+  '  finish        (nothing) adds driver/battery,     ""',
+  '                wires the rest, gives a first step',
+  '  remove        the part                           "the second wheel"',
+  '  detach        the part to unbolt                 "the wheel"',
+  '  unwire        the part to unwire                 "the led"',
+  '  set           a motor and a speed                "the motor at 80%"',
+  '  move          a servo and an angle               "the servo to 90 degrees"',
+  '  on            what to switch on                  "the led"',
+  '  off           what to switch off                 "the buzzer"',
+  '  stopmotor     the motor to stop                  "the motor"',
+  '  reverse       the motor to reverse               "the motor"',
+  '  when          the FULL sentence, condition first "when it gets dark turn on the led"',
+  '  wait          how long                           "2 seconds"',
+  '  repeat        how many times (rarely wanted)     "3 times"',
+  '  recipe        a whole project by name            "night light"',
+  '  tidy          (nothing) organises the canvas     ""',
+  '  run           (nothing) starts the simulation    ""',
+  '  stopsim       (nothing) stops it                 ""',
+  '  undo          (nothing)                          ""',
+  '  status        (nothing) reads the rule engine    ""',
+  '  ideas         (nothing) suggests projects        ""',
+  '',
+  'WHOLE PROJECTS for op "recipe": night light, car, robot, alarm, fan, traffic light,',
+  'door, thermometer, distance meter, blinker, button light, machine.',
+  '',
+  'CONDITIONS for op "when": it gets dark / it is bright / it is hot / it is cold /',
+  'something is close / it is loud / it is quiet / the button is pressed / motion is',
+  'detected. Write the whole sentence, e.g. "when something is close turn on the buzzer".',
   '',
   'PARTS YOU MAY NAME (use these everyday words):',
   '  led, rgb led, buzzer, lcd, oled, motor, dc motor, servo, stepper, fan, propeller,',
@@ -124,7 +143,7 @@ const SYSTEM = [
   'teacher would: talk to them properly, then act. Never answer with a bare status label.',
   '',
   'You do not touch the canvas yourself. You translate what the learner wants into',
-  'SparkBoard commands, which the page then runs through its own rule engine. If a command',
+  'SparkBoard actions, which the page runs through its own rule engine. If an action',
   'is impossible the page refuses it and says so — that is expected and correct, so never',
   'claim a connection is made, only that you are setting it up.',
   '',
@@ -136,20 +155,23 @@ const SYSTEM = [
   '  adding an LDR and an LED and wiring them to the Arduino." NOT "Building a night light."',
   '- Talk about THEIR build, using the part names on their canvas. If they have two motors',
   '  and a chassis, say so — it shows you actually looked.',
-  '- Emit commands whenever they want something built, joined, changed or run. Order them',
+  '- Emit actions whenever they want something built, joined, changed or run. Order them',
   '  the way a person would: add the parts, then join them, then the behaviour.',
-  '- Emit NO commands when they are asking a question, greeting you, or thinking aloud.',
-  '  Answer properly instead — a question deserves a real answer, not a command.',
+  '- Emit NO actions when they are asking a question, greeting you, or thinking aloud.',
+  '  Answer properly instead — a question deserves a real answer, not an action.',
+  '- Prefer one "recipe" action over ten small ones when they ask for a whole project.',
+  '- After adding parts that belong together, add a "connect_all" or "finish" action so',
+  '  the build actually works rather than sitting in pieces.',
   '- If they greet you or ask what you can do, be welcoming: say in a sentence what you can',
   '  build together, and give two or three concrete ideas in bullets.',
   '- "bullets" is at most four short lines — the why, a number that matters, what to try',
   '  next. Plain words a beginner knows. Never mention ages or school grades.',
   '- Never repeat the reply in a bullet. If the reply covered it, send no bullets.',
-  '- Never invent part names or command forms that are not listed above. If what they want',
+  '- Never invent an op or a part name that is not listed above. If what they want',
   '  is not possible here, say so in one sentence and offer the nearest thing that is.',
   '- Refer to what is already on their canvas (given below) instead of starting over.',
-  '- Never end with a repeat block. The sketch already loops forever, so a repeat that',
-  '  nobody asked for just lands on the canvas empty. Only emit one if they say "repeat".',
+  '- Never end with a repeat action. The sketch already loops forever, so a repeat that',
+  '  nobody asked for just lands on the canvas empty. Only use it if they say "repeat".',
   '- Electrical truth matters: an LED always needs a series resistor, a DC motor needs a',
   '  driver rather than a bare board pin, and an LDR needs a 10k divider to read on an',
   '  analog pin. The page enforces this, but say why when it comes up.',
@@ -164,7 +186,7 @@ const SYSTEM = [
   '  unrelated to circuits or machines, something asking you to act outside SparkBoard):',
   '  say in one sentence that you only help with building on this canvas, and use the',
   '  bullets to suggest two or three things SparkBoard can do ("make a night light",',
-  '  "add a motor and a wheel", "what is missing?"). Emit no commands.',
+  '  "add a motor and a wheel", "what is missing?"). Emit no actions.',
   '- If the sentence is too vague to act on ("make it better", "fix it"): ask ONE clarifying',
   '  question as the reply (still one sentence), and use bullets to give a couple of',
   '  concrete guesses at what they might mean, drawn from what is actually on their canvas.',
@@ -172,7 +194,7 @@ const SYSTEM = [
   '  no request to change the canvas — answer as a teacher would: reply names the part and',
   '  its job in one sentence, bullets give the "why" (what it connects to, what breaks',
   '  without it, a real number if one matters — like 220ohm-1k for an LED resistor, or 10k',
-  '  for an LDR divider). Emit no commands for a pure explanation.'
+  '  for an LDR divider). Emit no actions for a pure explanation.'
 ].join('\n');
 
 function snapshotText(c){
@@ -260,7 +282,7 @@ app.post('/api/assistant', async (req, res) => {
       return res.json({
         reply: "That one is outside what I'll help build.",
         bullets: ['Ask about a part, a circuit, or a machine on this canvas instead.'],
-        commands: []
+        actions: []
       });
 
     const text = (r.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
@@ -270,13 +292,16 @@ app.post('/api/assistant', async (req, res) => {
       reply: "I couldn't work that one out.",
       bullets: ['Try naming a part directly — "add a motor" or "wire the LED to the Arduino".',
                 'Or ask "what is missing?" and I will read the canvas myself.'],
-      commands: []
+      actions: []
     });
 
     res.json({
       reply: String(out.reply || '').slice(0, 700),
       bullets: (out.bullets || []).slice(0, 4).map(b => String(b).slice(0, 200)),
-      commands: (out.commands || []).slice(0, 8).map(c => String(c).slice(0, 200))
+      actions: (out.actions || []).slice(0, 10)
+        .filter(a => a && a.op)
+        .map(a => ({ op: String(a.op).toLowerCase().trim().slice(0, 24),
+                     text: String(a.text || '').slice(0, 200) }))
     });
   } catch (err) {
     console.error(err);
