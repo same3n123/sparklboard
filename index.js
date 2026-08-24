@@ -19,7 +19,7 @@ import cors from 'cors';
 import Anthropic from '@anthropic-ai/sdk';
 
 const PORT = process.env.PORT || 3000;
-const MODEL = process.env.MODEL || 'claude-opus-5';
+const MODEL = process.env.MODEL || 'claude-sonnet-5';
 /* Comma-separated list of sites allowed to call this service, or * for any */
 const ORIGINS = (process.env.ALLOWED_ORIGINS || '*').split(',').map(s => s.trim());
 /* Optional shared secret — if set, the page must send it as X-App-Token */
@@ -136,7 +136,27 @@ const SYSTEM = [
   '  nobody asked for just lands on the canvas empty. Only emit one if they say "repeat".',
   '- Electrical truth matters: an LED always needs a series resistor, a DC motor needs a',
   '  driver rather than a bare board pin, and an LDR needs a 10k divider to read on an',
-  '  analog pin. The page enforces this, but say why when it comes up.'
+  '  analog pin. The page enforces this, but say why when it comes up.',
+  '',
+  'WHEN THE REQUEST DOES NOT FIT',
+  '- If the sentence names a real part or idea but not one this canvas has (e.g. a camera,',
+  '  Wi-Fi, a screen beyond LCD/OLED, GPS, a speaker that plays music): say plainly that',
+  '  SparkBoard cannot build that, in one sentence — then name the closest part or project',
+  '  that IS here and offer it as a command. Never emit a command for the part they asked',
+  '  for if it does not exist in the parts list above.',
+  '- If the sentence is not about building or wiring anything at all (small talk, a request',
+  '  unrelated to circuits or machines, something asking you to act outside SparkBoard):',
+  '  say in one sentence that you only help with building on this canvas, and use the',
+  '  bullets to suggest two or three things SparkBoard can do ("make a night light",',
+  '  "add a motor and a wheel", "what is missing?"). Emit no commands.',
+  '- If the sentence is too vague to act on ("make it better", "fix it"): ask ONE clarifying',
+  '  question as the reply (still one sentence), and use bullets to give a couple of',
+  '  concrete guesses at what they might mean, drawn from what is actually on their canvas.',
+  '- If they ask what a part does, why it is needed, or how to wire something — even with',
+  '  no request to change the canvas — answer as a teacher would: reply names the part and',
+  '  its job in one sentence, bullets give the "why" (what it connects to, what breaks',
+  '  without it, a real number if one matters — like 220ohm-1k for an LED resistor, or 10k',
+  '  for an LDR divider). Emit no commands for a pure explanation.'
 ].join('\n');
 
 function snapshotText(c){
@@ -203,13 +223,15 @@ app.post('/api/assistant', async (req, res) => {
                  content: String(m.text).slice(0, 1000) }));
 
   try {
-    const r = await client.beta.messages.create({
+    /* server-side refusal fallback ("default") is only documented for Claude
+       Opus 5 / Fable 5 — on Sonnet 5 it is untested, so skip the beta rather
+       than risk another schema-shaped 400. Refusals are still handled below
+       via stop_reason, just without an automatic retry on another model. */
+    const r = await client.messages.create({
       model: MODEL,
       max_tokens: 2000,
-      betas: ['server-side-fallback-2026-07-01'],
-      fallbacks: 'default',
       system: [{ type: 'text', text: SYSTEM, cache_control: { type: 'ephemeral' } }],
-      output_config: { effort: 'low', format: { type: 'json_schema', schema: SCHEMA } },
+      output_config: { effort: 'medium', format: { type: 'json_schema', schema: SCHEMA } },
       messages: history.concat([{
         role: 'user',
         content: 'THIS IS THEIR CANVAS RIGHT NOW\n' +
@@ -219,12 +241,21 @@ app.post('/api/assistant', async (req, res) => {
     });
 
     if (r.stop_reason === 'refusal')
-      return res.json({ reply: 'I cannot help with that one.', bullets: [], commands: [] });
+      return res.json({
+        reply: "That one is outside what I'll help build.",
+        bullets: ['Ask about a part, a circuit, or a machine on this canvas instead.'],
+        commands: []
+      });
 
     const text = (r.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
     let out = null;
     try { out = JSON.parse(text); } catch (e) { out = null; }
-    if (!out) return res.json({ reply: 'I could not work that out.', bullets: [], commands: [] });
+    if (!out) return res.json({
+      reply: "I couldn't work that one out.",
+      bullets: ['Try naming a part directly — "add a motor" or "wire the LED to the Arduino".',
+                'Or ask "what is missing?" and I will read the canvas myself.'],
+      commands: []
+    });
 
     res.json({
       reply: String(out.reply || '').slice(0, 300),
