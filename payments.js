@@ -177,12 +177,33 @@ async function reconcile(order, paymentId){
   return { ok: true, payment: p };
 }
 
+/* The bare name of a refusal we raised ourselves, for the response's
+   `code` field. Only our own vocabulary passes: anything else — a
+   PostgREST message, a driver error, a stack — is reported as 'error',
+   so nothing internal is handed to a browser by accident. */
+const REASONS = [
+  'no_student', 'not_a_student', 'no_such_period', 'no_such_plan',
+  'no_such_order_kind', 'not_an_upgrade', 'free_plan_is_not_a_purchase',
+  'plan_is_not_purchasable', 'invalid_reseller_code', 'own_code',
+  'order_not_open', 'order_not_created', 'order_refunded', 'amount_mismatch'
+];
+function reason(e){
+  const m = String((e && e.message) || '');
+  for (const r of REASONS) if (m.indexOf(r) >= 0) return r;
+  return 'error';
+}
+
 /* An error a learner may read. Everything else stays in the log. */
 function plain(e){
   const m = String((e && e.message) || '');
   if (/invalid_reseller_code/.test(m)) return 'That discount code is not valid.';
   if (/own_code/.test(m))              return 'You cannot use your own reseller code.';
   if (/not_a_student/.test(m))         return 'Only a student account can buy a plan.';
+  /* Somebody pressed Upgrade whose plan ran out, or ended, while the page
+     was open. The page's own quote is a preview; this is the answer. */
+  if (/not_an_upgrade/.test(m))
+    return 'There is nothing to upgrade from — your current plan has ended or is not below this one. Buy a full term instead.';
+  if (/no_such_order_kind/.test(m))    return 'That kind of order is not available.';
   if (/no_such_plan|no_such_period/.test(m)) return 'That plan or period is not available.';
   if (/amount_mismatch/.test(m))       return 'The amount did not match. This payment is being reviewed — you have not been charged for access.';
   return 'That did not go through. Please try again.';
@@ -217,27 +238,46 @@ export function paymentRoutes(){
     const user = await whoIs(bearer(req));
     if (!user) return res.status(401).json({ error: 'Sign in first.' });
 
-    /* THE ONLY THREE THINGS THE BROWSER MAY SAY. Anything else it sent —
-       an amount, a discount, a reseller id — is not read. */
+    /* THE ONLY FOUR THINGS THE BROWSER MAY SAY. Anything else it sent —
+       an amount, a discount, a reseller id — is not read.
+
+       `kind` is the fourth, and it is not an amount: it says whether this
+       is a term of access or the DIFFERENCE to a dearer plan for time
+       already paid for. The database re-derives the plan they are on,
+       re-checks that the target is dearer and re-computes the proration,
+       so asking for an upgrade with nothing to upgrade from is refused
+       rather than quietly priced as something else. */
     const plan   = String((req.body && req.body.plan) || '').toLowerCase().trim();
     const period = String((req.body && req.body.billingPeriod) || '').toLowerCase().trim();
     const code   = String((req.body && req.body.resellerCode) || '').trim() || null;
+    const kind   = String((req.body && req.body.kind) || 'purchase').toLowerCase().trim();
 
     if (['standard', 'premium'].indexOf(plan) < 0)
       return res.status(400).json({ error: 'That plan is not available.' });
-    if (['monthly', 'yearly'].indexOf(period) < 0)
+    if (['purchase', 'upgrade'].indexOf(kind) < 0)
+      return res.status(400).json({ error: 'That kind of order is not available.' });
+    /* An upgrade runs to the end of the term the learner already holds,
+       so it has no period of its own to check — the database reads
+       theirs. A purchase must name one. */
+    if (kind === 'purchase' && ['monthly', 'yearly'].indexOf(period) < 0)
       return res.status(400).json({ error: 'That billing period is not available.' });
 
     let order;
     try {
       /* prices it, validates the code, writes a PENDING order */
       const rows = await rpc('payment_open_order',
-        { p_student: user.id, p_plan: plan, p_period: period, p_code: code });
+        { p_student: user.id, p_plan: plan, p_period: period || 'monthly',
+          p_code: code, p_kind: kind });
       order = Array.isArray(rows) ? rows[0] : rows;
       if (!order || !order.id) throw new Error('order_not_created');
     } catch (e){
       console.error('create-order (open):', e.message);
-      return res.status(400).json({ error: plain(e) });
+      /* `code` names WHICH refusal this was. Every one of these strings is
+         written by us, in this file or in the migrations, and none of them
+         carries a secret — a learner reporting "it will not go through"
+         with nothing but the generic sentence is a support case nobody can
+         answer, and that is exactly how this bug was reported. */
+      return res.status(400).json({ error: plain(e), code: reason(e) });
     }
 
     try {
@@ -252,6 +292,7 @@ export function paymentRoutes(){
           notes: {
             i4_order: order.id,
             plan: order.plan,
+            kind: order.order_kind || 'purchase',
             period: order.billing_period,
             months: String(order.access_duration_months)
           }
@@ -268,6 +309,8 @@ export function paymentRoutes(){
         amount: Number(order.final_amount),
         currency: order.currency || 'INR',
         plan: order.plan,
+        kind: order.order_kind || 'purchase',
+        upgradeFrom: order.upgrade_from || null,
         billingPeriod: order.billing_period,
         accessMonths: order.access_duration_months,
         monthsPaid: order.months_paid,
@@ -450,6 +493,7 @@ function publicOrder(o){
   if (!o) return null;
   return {
     id: o.id, plan: o.plan, billingPeriod: o.billing_period,
+    kind: o.order_kind || 'purchase', upgradeFrom: o.upgrade_from || null,
     accessMonths: o.access_duration_months, monthsPaid: o.months_paid,
     regularAmount: Number(o.regular_amount), finalAmount: Number(o.final_amount),
     currency: o.currency, resellerCode: o.reseller_code_used || null,

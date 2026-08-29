@@ -31,15 +31,53 @@ const PRICES = {
   'premium|monthly':  { regular: 149900, reseller: 74900,  given: 1,  paid: 1 },
   'premium|yearly':   { regular: 1499000,reseller: 749500, given: 12, paid: 10 }
 };
+/* plans.sort_order — what makes one plan "dearer" than another */
+const RANK = { free: 0, standard: 1, premium: 2 };
+
 const DB = {
   orders: new Map(), events: new Set(), purchases: [],
   profiles: new Map([['stu-1', { id:'stu-1', role:'student', subscription_status:'active',
-                                 subscription_plan:'free', plan_expires_at:null }]]),
+                                 subscription_plan:'free', plan_expires_at:null,
+                                 billing_cycle:'monthly' }]]),
   resellers: new Map([['sam50', { id:'res-1', user_id:'res-user', unique_code:'sam50' }]]),
   reset(){ this.orders.clear(); this.events.clear(); this.purchases.length = 0;
            this.profiles.set('stu-1', { id:'stu-1', role:'student',
-             subscription_status:'active', subscription_plan:'free', plan_expires_at:null }); }
+             subscription_status:'active', subscription_plan:'free', plan_expires_at:null,
+             billing_cycle:'monthly' }); }
 };
+
+/* public.upgrade_quote_for(), in the same arithmetic and the same order,
+   so a change to one is caught by these tests against the other.
+   Amounts here are PAISE, as the orders table stores them. */
+function upgradeQuote(studentId, plan, coded){
+  const prof = DB.profiles.get(studentId);
+  if (!prof) return null;
+  const now = new Date();
+  const exp = prof.plan_expires_at ? new Date(prof.plan_expires_at) : null;
+  /* plan_of(): an expired or cancelled plan is Free, with nothing to credit */
+  const cur = (prof.subscription_status === 'active' && (!exp || exp > now))
+              ? prof.subscription_plan : 'free';
+  if (cur === 'free' || cur === plan) return null;
+  if (!exp || exp <= now) return null;
+  if (RANK[plan] == null || RANK[cur] == null || RANK[plan] <= RANK[cur]) return null;
+
+  const cycle = prof.billing_cycle === 'yearly' ? 'yearly' : 'monthly';
+  const from = PRICES[cur + '|' + cycle], to = PRICES[plan + '|' + cycle];
+  if (!from || !to) return null;
+
+  const days = Math.ceil((exp - now) / 86400000);
+  if (days <= 0) return null;
+  const term = to.given * 30;
+  const frac = Math.min(1, Math.max(0, days / term));
+  /* rupees, rounded UP, so no upgrade price can carry paise */
+  const reg = Math.ceil(((to.regular - from.regular) / 100) * frac);
+  let fin = coded ? Math.ceil(((to.reseller - from.reseller) / 100) * frac) : reg;
+  if (reg <= 0) return null;
+  fin = Math.max(1, Math.min(fin, reg));
+  return { kind:'upgrade', from: cur, plan, cycle, daysLeft: days, termDays: term,
+           expiresAt: exp.toISOString(),
+           original: reg * 100, final: fin * 100 };      /* paise */
+}
 let seq = 0;
 
 const fakeDb = express();
@@ -53,21 +91,38 @@ fakeDb.post('/rest/v1/rpc/:fn', (req, res) => {
   const a = req.body || {};
   const fn = req.params.fn;
   try {
+    if (fn === 'upgrade_quote_for')
+      return res.json(upgradeQuote(a.p_student, String(a.p_plan || ''), !!a.p_coded));
+
     if (fn === 'payment_open_order'){
-      const key = a.p_plan + '|' + a.p_period;
-      const pr = PRICES[key];
-      if (!pr) throw new Error('no_such_plan');
+      const kind = String(a.p_kind || 'purchase');
+      if (kind !== 'purchase' && kind !== 'upgrade') throw new Error('no_such_order_kind');
       let resel = null;
       if (a.p_code){
         resel = DB.resellers.get(String(a.p_code).toLowerCase());
         if (!resel) throw new Error('invalid_reseller_code');
       }
+
+      let period = a.p_period, months, paid, reg, fin, was = null;
+      if (kind === 'upgrade'){
+        const up = upgradeQuote(a.p_student, String(a.p_plan || ''), !!resel);
+        if (!up) throw new Error('not_an_upgrade');
+        period = up.cycle; was = up.from;
+        reg = up.original; fin = up.final; months = 0; paid = 0;
+      } else {
+        const pr = PRICES[a.p_plan + '|' + a.p_period];
+        if (!pr) throw new Error('no_such_plan');
+        reg = pr.regular; fin = resel ? pr.reseller : pr.regular;
+        months = pr.given; paid = pr.paid;
+      }
+
       const o = {
         id: 'ord-' + (++seq), student_id: a.p_student, plan: a.p_plan,
-        billing_period: a.p_period, access_duration_months: pr.given, months_paid: pr.paid,
-        regular_amount: pr.regular, final_amount: resel ? pr.reseller : pr.regular,
+        billing_period: period, access_duration_months: months, months_paid: paid,
+        regular_amount: reg, final_amount: fin,
         currency: 'INR', reseller_id: resel ? resel.id : null,
         reseller_code_used: resel ? resel.unique_code : null,
+        order_kind: kind, upgrade_from: was,
         razorpay_order_id: null, razorpay_payment_id: null,
         payment_status: 'pending', access_status: 'pending',
         starts_at: null, expires_at: null, paid_at: null, flagged_reason: null
@@ -102,15 +157,26 @@ fakeDb.post('/rest/v1/rpc/:fn', (req, res) => {
       }
       const prof = DB.profiles.get(o.student_id);
       const now = new Date();
-      const cur = (prof.subscription_status === 'active' && prof.plan_expires_at)
-                  ? new Date(prof.plan_expires_at) : now;
-      const from = cur > now ? cur : now;
-      const exp = new Date(from); exp.setMonth(exp.getMonth() + o.access_duration_months);
+      let from, exp;
+      if (o.order_kind === 'upgrade'){
+        /* buys no time: the end date is the one they already had, and
+           never earlier than tomorrow */
+        from = now;
+        const had = prof.plan_expires_at ? new Date(prof.plan_expires_at) : now;
+        const min = new Date(now.getTime() + 86400000);
+        exp = had > min ? had : min;
+      } else {
+        const cur = (prof.subscription_status === 'active' && prof.plan_expires_at)
+                    ? new Date(prof.plan_expires_at) : now;
+        from = cur > now ? cur : now;
+        exp = new Date(from); exp.setMonth(exp.getMonth() + o.access_duration_months);
+      }
       o.payment_status='paid'; o.access_status='active';
       o.razorpay_payment_id = a.p_payment_id || o.razorpay_payment_id;
       o.paid_at = now.toISOString(); o.starts_at = from.toISOString(); o.expires_at = exp.toISOString();
       prof.subscription_plan = o.plan; prof.subscription_status='active';
       prof.plan_expires_at = o.expires_at;
+      prof.billing_cycle = o.billing_period;
       DB.purchases.push({ order:o.id, reseller_id:o.reseller_id, final:o.final_amount });
       return res.json([o]);
     }
@@ -377,6 +443,87 @@ DB.reset();
   ok('refund recorded', w.status===200 && o.payment_status==='refunded' && o.access_status==='cancelled');
   ok('the original order is NOT deleted', DB.orders.has(r.create.body.orderId));
   ok('the purchase record survives for the audit trail', DB.purchases.length===1); }
+
+console.log('\n=== 21-27. UPGRADING: the difference, for the time that is left ===');
+DB.reset();
+{ /* Standard, monthly, with 15 of the 30 days still to run. Half the
+     difference between 1,499 and 999 is 250. */
+  const soon = new Date(); soon.setDate(soon.getDate() + 15);
+  const prof = DB.profiles.get('stu-1');
+  prof.subscription_plan = 'standard'; prof.billing_cycle = 'monthly';
+  prof.plan_expires_at = soon.toISOString();
+
+  const c = await post('/api/payments/create-order',
+    { plan:'premium', billingPeriod:'monthly', kind:'upgrade' }, 'good-token');
+  ok('a Standard learner CAN open a Premium upgrade', c.status===200, c.body);
+  ok('priced as the prorated difference, not a new term',
+     c.body.amount === 25000, { got:c.body.amount, want:25000 });
+  ok('it buys no months', c.body.accessMonths === 0 && c.body.kind === 'upgrade', c.body);
+
+  const ends = new Date(soon);
+  const p = capture(c.body.razorpayOrderId, c.body.amount);
+  const v = await post('/api/payments/verify', { orderId:c.body.orderId, razorpay_payment_id:p.id,
+    razorpay_signature: paySig(c.body.razorpayOrderId, p.id) }, 'good-token');
+  ok('the upgrade goes through', v.status===200 && v.body.ok===true, v.body);
+  ok('the plan moved to premium', DB.profiles.get('stu-1').subscription_plan === 'premium');
+  ok('and the end date did NOT move',
+     Math.abs(new Date(v.body.order.expiresAt) - ends) < 60000,
+     { got:v.body.order.expiresAt, want:ends.toISOString() });
+  ok('the referral ledger still gets exactly one row', DB.purchases.length === 1); }
+
+console.log('\n=== 28-30. an upgrade nobody is entitled to is REFUSED, by name ===');
+DB.reset();
+{ /* on Free: there is nothing to upgrade from */
+  const c = await post('/api/payments/create-order',
+    { plan:'premium', billingPeriod:'monthly', kind:'upgrade' }, 'good-token');
+  ok('a Free learner cannot upgrade', c.status===400 && c.body.code==='not_an_upgrade', c.body);
+
+  /* on Premium already: nothing dearer to move to */
+  const soon = new Date(); soon.setDate(soon.getDate() + 20);
+  const prof = DB.profiles.get('stu-1');
+  prof.subscription_plan = 'premium'; prof.plan_expires_at = soon.toISOString();
+  const c2 = await post('/api/payments/create-order',
+    { plan:'standard', billingPeriod:'monthly', kind:'upgrade' }, 'good-token');
+  ok('a Premium learner cannot "upgrade" downwards',
+     c2.status===400 && c2.body.code==='not_an_upgrade', c2.body);
+
+  /* expired Standard: plan_of() says Free, so there is nothing to credit */
+  const past = new Date(); past.setDate(past.getDate() - 1);
+  prof.subscription_plan = 'standard'; prof.plan_expires_at = past.toISOString();
+  const c3 = await post('/api/payments/create-order',
+    { plan:'premium', billingPeriod:'monthly', kind:'upgrade' }, 'good-token');
+  ok('an expired plan cannot be upgraded', c3.status===400 && c3.body.code==='not_an_upgrade', c3.body); }
+
+console.log('\n=== 31-33. the browser still decides nothing about an upgrade ===');
+DB.reset();
+{ const soon = new Date(); soon.setDate(soon.getDate() + 15);
+  const prof = DB.profiles.get('stu-1');
+  prof.subscription_plan = 'standard'; prof.billing_cycle = 'monthly';
+  prof.plan_expires_at = soon.toISOString();
+
+  const c = await post('/api/payments/create-order',
+    { plan:'premium', billingPeriod:'yearly', kind:'upgrade',
+      amount: 100, final: 100, discount: 99, resellerId: 'res-1' }, 'good-token');
+  ok('an amount sent by the browser is ignored', c.body.amount === 25000, c.body);
+  ok('the period sent by the browser is ignored — the learner\'s own cycle is used',
+     c.body.billingPeriod === 'monthly', c.body);
+  ok('a reseller id sent by the browser buys no discount',
+     c.body.resellerApplied === false, c.body); }
+
+console.log('\n=== 34-35. a full term is still available to somebody who could upgrade ===');
+DB.reset();
+{ const soon = new Date(); soon.setDate(soon.getDate() + 15);
+  const prof = DB.profiles.get('stu-1');
+  prof.subscription_plan = 'standard'; prof.billing_cycle = 'monthly';
+  prof.plan_expires_at = soon.toISOString();
+
+  const r = await buy('premium','yearly',null);
+  ok('buying a full Premium term still charges the full term',
+     r.create.body.amount === 1499000, r.create.body);
+  const want = new Date(soon); want.setMonth(want.getMonth() + 12);
+  ok('and it EXTENDS from the old expiry, exactly as before',
+     Math.abs(new Date(r.verify.body.order.expiresAt) - want) < 60000,
+     { got:r.verify.body.order.expiresAt, want:want.toISOString() }); }
 
 console.log('\n=== secrets never leave the process ===');
 DB.reset();
