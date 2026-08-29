@@ -17,6 +17,9 @@
 import express from 'express';
 import cors from 'cors';
 import Anthropic from '@anthropic-ai/sdk';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { paymentRoutes, paymentsStatus } from './payments.js';
 
 const PORT = process.env.PORT || 3000;
 /* Sonnet 5 at effort:low is the balance point for this job: it is the cheapest
@@ -38,14 +41,121 @@ const EFFORT_OK = !/haiku|sonnet-4-5|-3-/i.test(MODEL);
 if (!process.env.ANTHROPIC_API_KEY)
   console.warn('ANTHROPIC_API_KEY is not set — /api/assistant will fail.');
 
+/* =====================================================================
+   Who is allowed to ask, and how often
+   ---------------------------------------------------------------------
+   The assistant is a PREMIUM feature with a daily allowance, and this is
+   where that is enforced — not in the browser, which can be edited, and
+   not in localStorage, which can be cleared.
+
+   Set SUPABASE_URL and SUPABASE_ANON_KEY (the same two public values
+   config/config.js already carries) and every request must arrive with
+   the learner's Supabase access token in Authorization: Bearer. This
+   service hands that token straight back to the database and calls
+
+       public.ai_message_consume()
+
+   which takes NO arguments: it reads who is calling from auth.uid(),
+   checks the plan carries 'ai_invent', and does the test and the
+   increment in ONE statement. So there is nothing here for a client to
+   lie about — not the user, not the plan, not the count.
+
+   Leave the two blank and this service behaves exactly as it did before:
+   open, rate-limited by IP only, which is what a local development copy
+   wants. The page then enforces the allowance through the same database
+   function on its own.
+
+   The ANON key is used deliberately. The service_role key would bypass
+   RLS and is not needed: the learner's own token, plus a SECURITY
+   DEFINER function, is the whole mechanism.
+   ===================================================================== */
+const SUPABASE_URL = String(process.env.SUPABASE_URL || '').trim().replace(/\/+$/, '');
+const SUPABASE_KEY = String(process.env.SUPABASE_ANON_KEY || '').trim();
+const GATED = !!(SUPABASE_URL && SUPABASE_KEY);
+
+if (GATED) console.log('assistant is gated: premium plan + daily allowance, checked in the database');
+else console.log('assistant is UNGATED (no SUPABASE_URL) — IP rate limit only');
+
+/* Spend one message from the caller's allowance, or say why not.
+   Returns { allowed, reason, used, limit, left, plan }. */
+async function spendMessage(bearer){
+  const r = await fetch(SUPABASE_URL + '/rest/v1/rpc/ai_message_consume', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      apikey: SUPABASE_KEY,
+      Authorization: 'Bearer ' + bearer
+    },
+    body: '{}'
+  });
+  if (r.status === 401 || r.status === 403)
+    return { allowed: false, reason: 'bad_token' };
+  if (!r.ok)
+    return { allowed: false, reason: 'usage_unavailable' };
+  const d = await r.json().catch(() => null);
+  return d && typeof d === 'object' ? d : { allowed: false, reason: 'usage_unavailable' };
+}
+
+/* The sentence a learner sees for each refusal. Each names what is still
+   open, because somebody who has run out must not think the application
+   has stopped. */
+function refusalFor(reason, u){
+  switch (reason){
+    case 'not_entitled':
+      return { status: 403,
+        error: 'Premium Feature — upgrade to Premium to access AI Assisted in Invent.' };
+    case 'limit_reached':
+      return { status: 429,
+        error: 'Daily AI message limit reached. Your AI message limit will reset tomorrow.' };
+    case 'bad_token':
+      return { status: 401,
+        error: 'Sign in again — this session has expired.' };
+    case 'no_token':
+      return { status: 401,
+        error: 'The assistant needs you to be signed in.' };
+    default:
+      return { status: 503,
+        error: 'Could not check your AI allowance just now — try again in a moment.' };
+  }
+}
+
 const client = new Anthropic();
 const app = express();
+
+/* ---------------------------------------------------------------------
+   THE WEBHOOK'S BODY MUST STAY RAW, and this must come BEFORE the JSON
+   parser or it will not.
+
+   Razorpay signs the exact bytes it sent. Parsing them to an object and
+   re-serialising does not reliably reproduce those bytes — key order,
+   whitespace and unicode escaping are all free to differ — so a signature
+   checked against a re-encoded body fails for perfectly genuine events,
+   or, worse, is written loosely enough to pass for forged ones.
+   --------------------------------------------------------------------- */
+app.use('/api/webhooks/razorpay', express.raw({ type: '*/*', limit: '1mb' }));
 
 app.use(express.json({ limit: '256kb' }));
 app.use(cors({
   origin: ORIGINS.includes('*') ? true : ORIGINS,
-  allowedHeaders: ['Content-Type', 'X-App-Token']
+  /* Authorization carries the learner's Supabase access token when this
+     service is gated. Without it in the allow-list the browser's
+     preflight refuses the request before it is ever made. */
+  allowedHeaders: ['Content-Type', 'X-App-Token', 'Authorization']
 }));
+
+/* ---------------------------------------------------------------------
+   Payments. Off unless RAZORPAY_KEY_ID / _SECRET and the Supabase service
+   key are all set — with any of them missing the endpoints answer 503 and
+   the Pricing page shows its plans without a Pay button. See payments.js.
+   --------------------------------------------------------------------- */
+app.use(paymentRoutes());
+{
+  const p = paymentsStatus();
+  console.log('payments: ' + (p.on ? ('on, ' + p.mode + ' mode' +
+    (p.mode === 'live' && !p.liveAllowed ? ' — BLOCKED, set RAZORPAY_LIVE=true to allow' : '') +
+    (p.webhook ? '' : ' — WARNING: no RAZORPAY_WEBHOOK_SECRET, webhooks will be refused'))
+    : 'off (not configured)'));
+}
 
 /* ---- a very small rate limit, so one page cannot run up a bill ---- */
 const SEEN = new Map();                       /* ip -> timestamps */
@@ -336,17 +446,36 @@ function plainError(err){
   return 'The assistant could not answer that one.';
 }
 
-/* A plain word at the root, so opening the address in a browser says something. */
-app.get('/', (_req, res) => res.type('text').send([
-  'SparkBoard assistant is running.',
-  '',
-  'There is no home page here. Health check:  /health',
-  'SparkBoard talks to it at:                 POST /api/assistant',
-  ''
-].join('\n')));
+/* ---------------------------------------------------------------------
+   Optionally serve the page itself from this same service.
+
+   OFF by default, because this file's whole reason for existing is to be a
+   small API that keeps the key away from the browser, and the page is
+   happiest on a plain static host. Set SERVE_STATIC=true and it also serves
+   the app that sits one directory up — which is the ONE-SERVICE deployment,
+   where the page and /api/assistant share an origin and no CORS is involved.
+   The page asks for that with  aiEndpoint: 'same-origin'  in config/config.js.
+   --------------------------------------------------------------------- */
+const SERVE_STATIC = String(process.env.SERVE_STATIC || '').toLowerCase() === 'true';
+const SITE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+if (SERVE_STATIC){
+  app.use(express.static(SITE, { extensions: ['html'] }));
+  console.log('serving the app from ' + SITE);
+} else {
+  /* A plain word at the root, so opening the address in a browser says something. */
+  app.get('/', (_req, res) => res.type('text').send([
+    'SparkBoard assistant is running.',
+    '',
+    'There is no home page here. Health check:  /health',
+    'SparkBoard talks to it at:                 POST /api/assistant',
+    ''
+  ].join('\n')));
+}
 
 app.get('/health', (_req, res) =>
-  res.json({ ok: true, model: MODEL, effort: EFFORT_OK ? EFFORT : null }));
+  res.json({ ok: true, model: MODEL, effort: EFFORT_OK ? EFFORT : null, gated: GATED,
+             payments: paymentsStatus().mode }));
 
 app.post('/api/assistant', async (req, res) => {
   if (APP_TOKEN && req.get('X-App-Token') !== APP_TOKEN)
@@ -358,6 +487,38 @@ app.post('/api/assistant', async (req, res) => {
 
   const message = String((req.body && req.body.message) || '').slice(0, 2000).trim();
   if (!message) return res.status(400).json({ error: 'No message.' });
+
+  /* ---------------------------------------------------------------
+     The allowance is spent HERE, before a single token is bought from
+     the model — so a refusal costs nothing, and a learner who is out
+     cannot run up a bill by editing the page.
+
+     It is spent on QUESTIONS. Everything the page handles on its own —
+     clearing the chat, "ai off" — never reaches this endpoint at all.
+     --------------------------------------------------------------- */
+  let usage = null;
+  if (GATED){
+    const auth = String(req.get('Authorization') || '');
+    const bearer = /^Bearer\s+(.+)$/i.test(auth) ? auth.replace(/^Bearer\s+/i, '').trim() : '';
+    if (!bearer){
+      const r = refusalFor('no_token');
+      return res.status(r.status).json({ error: r.error });
+    }
+    let spent;
+    try { spent = await spendMessage(bearer); }
+    catch (e){ console.error('allowance check failed', e); spent = { allowed: false, reason: 'usage_unavailable' }; }
+
+    if (!spent.allowed){
+      const r = refusalFor(spent.reason, spent);
+      return res.status(r.status).json({
+        error: r.error,
+        usage: { used: spent.used || 0, limit: spent.limit || 0, plan: spent.plan || null }
+      });
+    }
+    /* handed back with the answer, so the page's "7 / 10" is the count
+       the database actually made rather than one the page guessed at */
+    usage = { used: spent.used, limit: spent.limit, left: spent.left, plan: spent.plan };
+  }
 
   /* the last few turns, so "do that again" means something */
   const raw = (req.body && Array.isArray(req.body.history)) ? req.body.history : [];
@@ -392,7 +553,7 @@ app.post('/api/assistant', async (req, res) => {
       return res.json({
         reply: "That one is outside what I'll help build.",
         bullets: ['Ask about a part, a circuit, or a machine on this canvas instead.'],
-        actions: []
+        actions: [], usage
       });
 
     const text = (r.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
@@ -412,7 +573,7 @@ app.post('/api/assistant', async (req, res) => {
           ? ['Shorter questions work better — "why is the LED off?" rather than a paragraph.']
           : ['Try naming a part directly — "add a motor" or "wire the LED to the Arduino".',
              'Or ask "what is missing?" and I will read the canvas myself.'],
-        actions: []
+        actions: [], usage
       });
     }
 
@@ -422,7 +583,8 @@ app.post('/api/assistant', async (req, res) => {
       actions: (out.actions || []).slice(0, 24)
         .filter(a => a && a.op)
         .map(a => ({ op: String(a.op).toLowerCase().trim().slice(0, 24),
-                     text: String(a.text || '').slice(0, 200) }))
+                     text: String(a.text || '').slice(0, 200) })),
+      usage
     });
   } catch (err) {
     console.error(err);

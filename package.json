@@ -2,10 +2,15 @@
   "name": "sparkboard-assistant",
   "version": "1.0.0",
   "private": true,
-  "description": "Assistant service for SparkBoard — turns a sentence into SparkBoard commands.",
+  "description": "I 4 Invent service: the assistant, and the Razorpay payment endpoints.",
   "type": "module",
-  "engines": { "node": ">=20" },
-  "scripts": { "start": "node index.js" },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "test:payments": "node test-payments.mjs"
+  },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.71.0",
     "cors": "^2.8.5",

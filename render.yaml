@@ -13,9 +13,34 @@ services:
         sync: false            # paste your key in the Render dashboard
       - key: MODEL
         value: claude-sonnet-5
+      - key: EFFORT
+        value: low
+      # Comma-separated exact origins, no trailing slash. Dashboard-managed:
+      # a blueprint value: would revert a tightened list back to "*".
+      # www and the bare domain are different origins — list both.
       - key: ALLOWED_ORIGINS
-        value: "*"             # tighten to your site once you know its address
+        sync: false
       - key: MAX_PER_MINUTE
         value: "20"
       - key: APP_TOKEN
-        sync: false            # optional shared secret; leave blank to skip
+        sync: false
+      # Premium gate + daily AI allowance, checked in the database.
+      # Public values; the service_role key is never used. See README.
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      # Payments. See server/README.md — test keys first, and a live key
+      # is refused unless RAZORPAY_LIVE=true.
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      # Dashboard-managed: a blueprint value: is re-applied on every sync
+      # and would switch payments off again. Unset means OFF.
+      - key: RAZORPAY_LIVE
+        sync: false
