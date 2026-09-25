@@ -44,3 +44,11 @@ services:
       # and would switch payments off again. Unset means OFF.
       - key: RAZORPAY_LIVE
         sync: false
+      # The Shop (shop.js): the confirmation email, through Resend. Unset:
+      # orders still complete, no email is sent.
+      - key: RESEND_API_KEY
+        sync: false
+      - key: SHOP_MAIL_FROM
+        sync: false
+      - key: SHOP_NOTIFY_EMAIL
+        sync: false

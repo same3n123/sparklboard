@@ -20,6 +20,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { paymentRoutes, paymentsStatus } from './payments.js';
+import { shopRoutes, shopStatus } from './shop.js';
 
 const PORT = process.env.PORT || 3000;
 /* Sonnet 5 at effort:low is the balance point for this job: it is the cheapest
@@ -149,6 +150,12 @@ app.use(cors({
    the Pricing page shows its plans without a Pay button. See payments.js.
    --------------------------------------------------------------------- */
 app.use(paymentRoutes());
+/* The Shop: the Starter Kit, paid for through the same Razorpay account.
+   No session needed — see shop.js. Its webhook share rides on the one
+   /api/webhooks/razorpay route above. */
+app.use(shopRoutes());
+console.log('shop: ' + (shopStatus().on ? 'on' : 'off') +
+  (shopStatus().email ? ', confirmation email on' : ', confirmation email OFF (no RESEND_API_KEY)'));
 {
   const p = paymentsStatus();
   console.log('payments: ' + (p.on ? ('on, ' + p.mode + ' mode' +
@@ -475,7 +482,7 @@ if (SERVE_STATIC){
 
 app.get('/health', (_req, res) =>
   res.json({ ok: true, model: MODEL, effort: EFFORT_OK ? EFFORT : null, gated: GATED,
-             payments: paymentsStatus().mode }));
+             payments: paymentsStatus().mode, shopEmail: shopStatus().email }));
 
 app.post('/api/assistant', async (req, res) => {
   if (APP_TOKEN && req.get('X-App-Token') !== APP_TOKEN)

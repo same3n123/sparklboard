@@ -224,3 +224,51 @@ them: every plan/period/reseller combination, duplicate callbacks, duplicate web
 forged signatures, amount mismatch, an `authorized`-but-not-captured payment, access
 extension, refunds, and that no secret appears in any response. It does **not** test
 Razorpay itself — that still needs a real test-mode key.
+
+## The Shop (the Starter Kit, `shop.js`)
+
+The Starter Kit is a physical box sold on `/shop`. It goes through the **same Razorpay
+account, signature check and reconcile** as the plans — `shop.js` borrows them from
+`payments.js` (`payCore`) rather than keeping a second copy — but it is a different kind
+of order, kept in its own table (`public.shop_orders`, migration `0036_shop_orders.sql`):
+
+- **No account is needed to buy one.** `POST /api/shop/create-order` takes the delivery
+  details (name, email, phone, address, city, state, PIN) and a product **key**. A Bearer
+  token, if one is sent, is checked with Supabase and only links the order to that account.
+- **The price is the database's.** `shop_open_order()` reads `public.shop_products` and
+  writes the amount onto the order in paise; the browser never sends one, and a capture
+  for any other amount is flagged, not accepted.
+- **`POST /api/shop/verify`** is the browser callback: the signature is checked against
+  the Razorpay order id on OUR row, the payment is read back from Razorpay, then
+  `shop_mark_paid()` settles it. The webhook settles it too if the buyer closed the tab —
+  `payments.js` hands any Razorpay order it does not recognise to `shop.js`.
+- **The confirmation email goes out exactly once**, through Resend, the moment the order
+  is paid. `shop_claim_email()` decides whether the callback or the webhook sends it; a
+  failed send hands the claim back. With no `RESEND_API_KEY` the order still completes and
+  the admin's list shows *✉ not sent*.
+- **Two more emails follow the box** (0037): *Shipped* (the courier, the tracking number
+  and the courier's tracking link) and *Delivered*. The admin moves an order on the **Kit
+  orders** page, and the page then calls **`POST /api/shop/notify`** `{ orderId, kind,
+  resend }` with the admin's own session token. The service does NOT decide who is an admin:
+  it calls `admin_shop_order()` WITH that token, which checks `is_admin()` from inside, and
+  only then reads the row with the service key and sends. `shop_claim_notice()` makes each
+  email go once; `resend: true` is the admin's explicit *Send again*.
+- **Every email links to the buyer's order page**, `/#order-<track_token>` — a private link
+  that shows the stage, the dates, the courier and the tracking number, and never the
+  street address, the phone or the email.
+
+### Environment
+
+| Variable | Required | Meaning |
+|---|---|---|
+| `RESEND_API_KEY` | for email | A Resend key for the verified `i4invent.com` domain. Never in the page. |
+| `SHOP_MAIL_FROM` | no | Default `I 4 Invent <orders@i4invent.com>`. Use `staging@` on the staging service. |
+| `SHOP_NOTIFY_EMAIL` | no | The team's address; gets a BCC of every confirmation (so every order reaches a person). |
+| `SHOP_REPLY_TO` | no | Where a customer's reply goes. |
+| `SHOP_SITE` | no | Default `https://i4invent.com` — the link in the email. |
+
+The Razorpay and Supabase variables above are the same ones; nothing else is needed.
+**Run `0036_shop_orders.sql` and `0037_shop_fulfilment.sql` first** (staging, then
+production): until 0036 exists, create-order answers *"The shop is not set up on this server
+yet."*, and until 0037 exists the notify endpoint cannot check an admin and the shipped and
+delivered emails are not sent.

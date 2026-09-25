@@ -185,6 +185,7 @@ const REASONS = [
   'no_student', 'not_a_student', 'no_such_period', 'no_such_plan',
   'no_such_order_kind', 'not_an_upgrade', 'free_plan_is_not_a_purchase',
   'plan_is_not_purchasable', 'invalid_reseller_code', 'own_code',
+  'no_such_level', 'level_already_owned',
   'order_not_open', 'order_not_created', 'order_refunded', 'amount_mismatch'
 ];
 function reason(e){
@@ -204,10 +205,32 @@ function plain(e){
   if (/not_an_upgrade/.test(m))
     return 'There is nothing to upgrade from — your current plan has ended or is not below this one. Buy a full term instead.';
   if (/no_such_order_kind/.test(m))    return 'That kind of order is not available.';
+  if (/level_already_owned/.test(m))   return 'You already have that level — pick another one.';
+  if (/no_such_level/.test(m))         return 'Pick which level you want to buy.';
   if (/no_such_plan|no_such_period/.test(m)) return 'That plan or period is not available.';
   if (/amount_mismatch/.test(m))       return 'The amount did not match. This payment is being reviewed — you have not been charged for access.';
   return 'That did not go through. Please try again.';
 }
+
+/* =====================================================================
+   WHAT server/shop.js BORROWS. The Starter Kit is sold through the same
+   Razorpay account, the same signature check and the same reconcile —
+   one copy of each, here. shop.js imports this; this file never imports
+   shop.js, so there is no cycle to evaluate half-way.
+
+   onUnknownOrder(fn): the webhook below knows plan orders. A Razorpay
+   order id it cannot find is offered to each registered handler in turn
+   — fn(event, entity, razorpayOrderId) resolves true when it was theirs.
+   ===================================================================== */
+const unknownOrderHandlers = [];
+export function onUnknownOrder(fn){ if (typeof fn === 'function') unknownOrderHandlers.push(fn); }
+export const payCore = {
+  rpc, rzp, reconcile, paymentSignatureOk,
+  on(){ return PAYMENTS_ON && (!IS_LIVE || LIVE_OK); },
+  keyId(){ return KEY_ID; },
+  dbOn(){ return !!(SUPABASE_URL && SERVICE_KEY && ANON_KEY); },
+  whoIs, bearer
+};
 
 /* =====================================================================
    the router
@@ -251,6 +274,14 @@ export function paymentRoutes(){
     const period = String((req.body && req.body.billingPeriod) || '').toLowerCase().trim();
     const code   = String((req.body && req.body.resellerCode) || '').trim() || null;
     const kind   = String((req.body && req.body.kind) || 'purchase').toLowerCase().trim();
+    /* A Level pass names WHICH level (1-7). It is not an amount; the
+       database checks it and refuses one the learner already holds (0028). */
+    const level  = parseInt(req.body && req.body.level, 10);
+    /* THE KIT IN THE CART. A flag, never an amount: a monthly purchase may
+       carry the practice kit, and payment_open_order() (0033) adds the
+       kit's own plan_prices row to the order. Anything but `true` on a
+       monthly purchase is ignored. */
+    const kit    = req.body && req.body.kit === true && kind === 'purchase' && period === 'monthly';
 
     if (['standard', 'premium'].indexOf(plan) < 0)
       return res.status(400).json({ error: 'That plan is not available.' });
@@ -259,15 +290,24 @@ export function paymentRoutes(){
     /* An upgrade runs to the end of the term the learner already holds,
        so it has no period of its own to check — the database reads
        theirs. A purchase must name one. */
-    if (kind === 'purchase' && ['monthly', 'yearly'].indexOf(period) < 0)
+    /* 'yearly' is retired; the database refuses it by name */
+    if (kind === 'purchase' && ['monthly', 'yearly', 'level', 'kit'].indexOf(period) < 0)
       return res.status(400).json({ error: 'That billing period is not available.' });
+    if (kind === 'purchase' && period === 'level' && !(level >= 1 && level <= 7))
+      return res.status(400).json({ error: 'Pick which level you want to buy.', code: 'no_such_level' });
 
     let order;
     try {
       /* prices it, validates the code, writes a PENDING order */
       const rows = await rpc('payment_open_order',
-        { p_student: user.id, p_plan: plan, p_period: period || 'monthly',
-          p_code: code, p_kind: kind });
+        Object.assign({ p_student: user.id, p_plan: plan, p_period: period || 'monthly',
+          p_code: code, p_kind: kind },
+          /* only a Level order names a level, so a database without 0028
+             is never sent an argument it has no parameter for */
+          period === 'level' ? { p_level: level } : {},
+          /* likewise the kit: only an order that carries it names it, so a
+             database without 0033 is never sent p_kit */
+          kit ? { p_kit: true } : {}));
       order = Array.isArray(rows) ? rows[0] : rows;
       if (!order || !order.id) throw new Error('order_not_created');
     } catch (e){
@@ -294,7 +334,9 @@ export function paymentRoutes(){
             plan: order.plan,
             kind: order.order_kind || 'purchase',
             period: order.billing_period,
-            months: String(order.access_duration_months)
+            months: String(order.access_duration_months),
+            level: order.level ? String(order.level) : '',
+            kit: order.kit_included ? '1' : ''
           }
         })
       });
@@ -312,6 +354,8 @@ export function paymentRoutes(){
         kind: order.order_kind || 'purchase',
         upgradeFrom: order.upgrade_from || null,
         billingPeriod: order.billing_period,
+        level: order.level || null,
+        kitIncluded: !!order.kit_included,
         accessMonths: order.access_duration_months,
         monthsPaid: order.months_paid,
         regularAmount: Number(order.regular_amount),
@@ -457,7 +501,13 @@ export function paymentRoutes(){
 
       const rows = await rpc('orders_by_razorpay', { p_rzp_order: rzpOrderId });
       const order = Array.isArray(rows) ? rows[0] : rows;
-      if (!order) return res.json({ ok: true, ignored: 'unknown order' });
+      if (!order){
+        /* not a plan order — a Starter Kit, perhaps (server/shop.js) */
+        for (const fn of unknownOrderHandlers){
+          if (await fn(event, ent, rzpOrderId)) return res.json({ ok: true });
+        }
+        return res.json({ ok: true, ignored: 'unknown order' });
+      }
 
       if (event === 'payment.captured'){
         /* payment_mark_paid is idempotent, so the callback having already
@@ -492,7 +542,8 @@ export function paymentRoutes(){
 function publicOrder(o){
   if (!o) return null;
   return {
-    id: o.id, plan: o.plan, billingPeriod: o.billing_period,
+    id: o.id, plan: o.plan, billingPeriod: o.billing_period, level: o.level || null,
+    kitIncluded: !!o.kit_included,
     kind: o.order_kind || 'purchase', upgradeFrom: o.upgrade_from || null,
     accessMonths: o.access_duration_months, monthsPaid: o.months_paid,
     regularAmount: Number(o.regular_amount), finalAmount: Number(o.final_amount),
