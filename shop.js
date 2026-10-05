@@ -1,5 +1,5 @@
 /* =====================================================================
-   I 4 Invent — the Shop: the Starter Kit, paid for on the page
+   I 4 Invent — the Shop: kits and books, paid for on the page
    ---------------------------------------------------------------------
    TWO ENDPOINTS, and the rule payments.js is written against:
 
@@ -13,6 +13,10 @@
 
    plus a hook on payments.js's webhook, so a Razorpay payment.captured
    for a kit is settled even if the buyer closed the tab.
+
+   THREE THINGS ARE SOLD — the FREDIE Kit, the Starter Kit and the starter
+   book on its own (PRODUCTS, below). Each is a row in public.shop_products
+   as well; a key in one and not the other is refused.
 
    A KIT IS BOUGHT BY SOMEBODY WHO MAY HAVE NO ACCOUNT — a parent at a
    school gate with a phone — so, unlike a plan, neither endpoint needs a
@@ -32,11 +36,23 @@
    once; with no key configured the order still completes and the page
    says to keep the order number.
 
+   THE SENDER IS I 4 INVENT, AND A REPLY REACHES THE SUPPORT INBOX. Resend
+   will only send FROM a domain verified on the account, which is
+   i4invent.com — a gmail.com From is refused outright (and would fail
+   DMARC if it were not). So the email is from orders@i4invent.com and its
+   Reply-To is the support address, because every email says "reply to
+   this email" and orders@ is not a mailbox anybody reads.
+
+   Razorpay ALSO sends the buyer its own receipt, from no-reply@razorpay.com.
+   That one cannot be switched off (its partner banks mandate it); what a
+   merchant controls is the business name printed on it — the Billing
+   Label in the Razorpay dashboard.
+
    ENVIRONMENT
      RESEND_API_KEY      sends the confirmation. Unset: no email, order still fine.
-     SHOP_MAIL_FROM      default  I 4 Invent <orders@i4invent.com>
-     SHOP_NOTIFY_EMAIL   optional; the team gets a BCC of every confirmation
-     SHOP_REPLY_TO       optional; where a customer's reply goes
+     SHOP_MAIL_FROM      default  I 4 Invent <orders@i4invent.com>  (must be @i4invent.com)
+     SHOP_REPLY_TO       default  i4invent.support@gmail.com  (where a customer's reply goes)
+     SHOP_NOTIFY_EMAIL   optional; the team gets a BCC of every email
      SHOP_SITE           default  https://i4invent.com  (links in the email)
    ===================================================================== */
 import express from 'express';
@@ -45,17 +61,62 @@ import { payCore, onUnknownOrder } from './payments.js';
 const RESEND_KEY = String(process.env.RESEND_API_KEY || '').trim();
 const MAIL_FROM  = String(process.env.SHOP_MAIL_FROM || 'I 4 Invent <orders@i4invent.com>').trim();
 const NOTIFY     = String(process.env.SHOP_NOTIFY_EMAIL || '').trim();
-const REPLY_TO   = String(process.env.SHOP_REPLY_TO || '').trim();
+/* the same address the About page prints (js/13-about.js, ABOUT_EMAIL) */
+const REPLY_TO   = String(process.env.SHOP_REPLY_TO || 'i4invent.support@gmail.com').trim();
 const SITE       = String(process.env.SHOP_SITE || 'https://i4invent.com').trim().replace(/\/+$/, '');
 
-/* what is for sale, as the email names it — the PRICE is never here */
+/* A From on any domain but the verified one is refused by Resend on every
+   send, so say so at boot rather than at the first paid order. */
+const MAIL_DOMAIN = (MAIL_FROM.match(/@([^>\s]+)>?\s*$/) || [])[1] || '';
+if (RESEND_KEY && !/(^|\.)i4invent\.com$/i.test(MAIL_DOMAIN))
+  console.error('shop: SHOP_MAIL_FROM is "' + MAIL_FROM + '" — Resend only sends from the verified ' +
+    'i4invent.com domain, so every shop email will be refused. Use e.g. I 4 Invent <orders@i4invent.com>, ' +
+    'and put a Gmail address in SHOP_REPLY_TO instead.');
+
+/* WHAT IS FOR SALE, as the emails name it — the PRICE is never here; it is
+   public.shop_products (0036, 0038). A product is sold only when it is in
+   BOTH: this list refuses a key it does not know before the database is
+   asked, and shop_open_order() refuses one with no active row.
+
+     short    how a sentence says it — "your FREDIE Kit is on its way"
+     thing    kit | book
+     line     one line about it, in the confirmation
+     wait     what the buyer can do before it arrives
+     arrived  the first thing to do when it does
+     start    where to begin
+     page     [label, hash] of a page on the site worth opening, or null
+
+   FREDIE's words are its own poster's; nothing is promised about it here
+   that the poster does not say. */
 const PRODUCTS = {
-  'starter-kit': { name: 'I 4 Invent Starter Kit — Level 1',
-                   line: 'Every part for all 12 Level 1 projects, a pre-programmed Arduino and a complete starter book' }
+  'fredie-kit': {
+    name: 'FREDIE Robotic Arm Kit', short: 'FREDIE Kit', thing: 'kit',
+    line: 'A 6 DOF robotic arm powered by ESP32 — the arm, the gripper, six servo motors and the electronics, with the How to Make guide, access to the FREDIE app and technical support',
+    wait: 'When it arrives, the step-by-step How to Make guide takes you through the build.',
+    arrived: 'Open the box and start with the How to Make guide — detailed instructions, with images, to build your FREDIE with ease.',
+    start: 'Follow the How to Make guide to build the arm, then control it from the FREDIE app with voice and app commands. If you get stuck, reply to this email and our team will help.',
+    page: null },
+  'starter-kit': {
+    name: 'I 4 Invent Starter Kit — Level 1', short: 'Starter Kit', thing: 'kit',
+    line: 'Every part for all 12 Level 1 projects, a pre-programmed Arduino and a complete starter book',
+    wait: 'You can start today: every Level 1 project can be built on screen first, step by step.',
+    arrived: 'Open the box, open the starter book, and build your first circuit. The Arduino is already programmed — plug it in and it works.',
+    start: 'Begin with Light an LED in your starter book, then scan the QR code on its page to build the same circuit on screen, step by step.',
+    page: ['Open the kit page', '/#kit'] },
+  'starter-book': {
+    name: 'Circuit Explorer — the Level 1 Starter Book', short: 'Starter Book', thing: 'book',
+    line: 'The printed Level 1 book on its own — every component explained and every project step by step, with a QR code to build each one on screen',
+    wait: 'You can start today: every Level 1 project can be built on screen first, step by step.',
+    arrived: 'Open it at the first project. Every project has a QR code that opens the same circuit on screen, where you can build it and run it.',
+    start: 'Begin with Light an LED, then scan the QR code on its page to build the same circuit on screen, step by step.',
+    page: ['Start building on screen', '/#train'] }
 };
+/* an order whose product this build does not know still gets an email */
+const productOf = key => PRODUCTS[key] ||
+  { name: String(key || 'your order'), short: 'order', thing: 'order', line: '', wait: '', arrived: '', start: '', page: null };
 
 export function shopStatus(){
-  return { on: payCore.on(), email: !!RESEND_KEY, notify: !!NOTIFY };
+  return { on: payCore.on(), email: !!RESEND_KEY, notify: !!NOTIFY, from: MAIL_FROM, replyTo: REPLY_TO };
 }
 
 /* ---------------------------------------------------------------------
@@ -178,25 +239,27 @@ function mailShell(o, m){
 
 /* what each email says. `text` is the plain-text part, line by line */
 function mailFor(o, kind){
-  const p = PRODUCTS[o.product] || { name: o.product, line: '' };
-  const track = trackLink(o), kit = SITE + '/#kit';
+  const p = productOf(o.product);
+  const track = trackLink(o);
+  const page = p.page ? [p.page[0], SITE + p.page[1]] : null;
+  const sentence = s => (s ? s + (/[.!?]$/.test(s) ? '' : '.') : '');
   const mono = s => '<span style="font-family:Consolas,monospace;font-size:13px">' + h(s) + '</span>';
   if (kind === 'shipped'){
     const courierRows = [['Order number', '<b>' + h(ref(o)) + '</b>'], ['Courier', h(o.courier || '—')]];
     if (o.tracking_no) courierRows.push(['Tracking number', mono(o.tracking_no), true]);
     return {
-      subject: 'Shipped — ' + ref(o) + ' · your I 4 Invent Starter Kit is on its way',
+      subject: 'Shipped — ' + ref(o) + ' · your ' + p.short + ' is on its way',
       html: mailShell(o, {
         badge: 'SHIPPED', badgeBg: '#E1F3F7', badgeInk: '#00697F',
-        heading: 'Good news, ' + firstName(o) + ' — your kit is on its way.',
-        intro: 'Your Starter Kit has left us and is with ' + h(o.courier || 'the courier') + '. Here is how to follow it.',
+        heading: 'Good news, ' + firstName(o) + ' — your ' + p.thing + ' is on its way.',
+        intro: 'Your ' + h(p.short) + ' has left us and is with ' + h(o.courier || 'the courier') + '. Here is how to follow it.',
         rows: courierRows, address: true,
         boxTitle: 'Follow your parcel',
         boxText: 'Use the tracking number with the courier, or open your order page — it shows every step, from packed to delivered.',
         buttons: [].concat(o.tracking_url ? [['Track with ' + (o.courier || 'the courier') + ' →', o.tracking_url]] : [],
                            [['Your order page →', track]])
       }),
-      text: ['I 4 INVENT — SHIPPED', '', 'Good news, ' + firstName(o) + ' — your Starter Kit is on its way.', '',
+      text: ['I 4 INVENT — SHIPPED', '', 'Good news, ' + firstName(o) + ' — your ' + p.short + ' is on its way.', '',
         'Order number: ' + ref(o), 'Courier: ' + (o.courier || '—'),
         o.tracking_no ? 'Tracking number: ' + o.tracking_no : '', o.tracking_url ? 'Track with the courier: ' + o.tracking_url : '', '',
         'Delivering to:', o.name, o.address, o.city + ', ' + o.state + ' — ' + o.pin, '',
@@ -208,38 +271,38 @@ function mailFor(o, kind){
       subject: 'Delivered — ' + ref(o) + ' · time to build!',
       html: mailShell(o, {
         badge: 'DELIVERED', badgeBg: '#E3F7EC', badgeInk: '#146C3A',
-        heading: 'Your Starter Kit has arrived, ' + firstName(o) + '!',
-        intro: 'Open the box, open the starter book, and build your first circuit. The Arduino is already programmed — plug it in and it works.',
+        heading: 'Your ' + p.short + ' has arrived, ' + firstName(o) + '!',
+        intro: h(p.arrived || 'It is with you now.'),
         rows: [['Order number', '<b>' + h(ref(o)) + '</b>'], ['Item', h(p.name)]], address: false,
         boxTitle: 'Where to start',
-        boxText: 'Begin with Light an LED in your starter book, then scan the QR code on its page to build the same circuit on screen, step by step.',
-        buttons: [['Open the kit page →', kit], ['Your order page', track]]
+        boxText: h(p.start || 'If anything is missing or not right, reply to this email and we will sort it out.'),
+        buttons: (page ? [[page[0] + ' →', page[1]]] : []).concat([['Your order page', track]])
       }),
-      text: ['I 4 INVENT — DELIVERED', '', 'Your Starter Kit has arrived, ' + firstName(o) + '!', '',
-        'Order number: ' + ref(o), '', 'Start here: ' + kit, 'Your order page: ' + track, '',
+      text: ['I 4 INVENT — DELIVERED', '', 'Your ' + p.short + ' has arrived, ' + firstName(o) + '!', '',
+        'Order number: ' + ref(o), '', p.start || '', page ? page[0] + ': ' + page[1] : '', 'Your order page: ' + track, '',
         'Questions? Reply to this email and quote ' + ref(o) + '.']
     };
   }
   return {
-    subject: 'Order confirmed — ' + ref(o) + ' · I 4 Invent Starter Kit',
+    subject: 'Order confirmed — ' + ref(o) + ' · ' + p.short,
     html: mailShell(o, {
       badge: 'ORDER CONFIRMED', badgeBg: '#E3F7EC', badgeInk: '#146C3A',
       heading: 'Thank you, ' + firstName(o) + '. Your order is confirmed.',
-      intro: 'We have received your payment and your order is confirmed. We will pack your Starter Kit and email you again the moment it ships.',
+      intro: 'We have received your payment and your order is confirmed. We will pack your ' + h(p.short) + ' and email you again the moment it ships.',
       rows: [['Order number', '<b>' + h(ref(o)) + '</b>'], ['Item', h(p.name)], ['Quantity', '1'], ['Delivery', 'Included'],
              ['Amount paid', h(rupees(o.amount_paise)), true]]
         .concat(o.razorpay_payment_id ? [['Payment ID', '<span style="font-family:Consolas,monospace;font-size:12px">' + h(o.razorpay_payment_id) + '</span>']] : []),
       address: true,
       boxTitle: 'While you wait',
-      boxText: h(p.line) + '. You can start today: every Level 1 project can be built on screen first, step by step.',
-      buttons: [['Track your order →', track], ['Open the kit page', kit]]
+      boxText: h((sentence(p.line) + ' ' + p.wait).trim()),
+      buttons: [['Track your order →', track]].concat(page ? [page] : [])
     }),
     text: ['I 4 INVENT — ORDER CONFIRMED', '',
-      'Thank you, ' + firstName(o) + '. We have received your payment and your Starter Kit order is confirmed.', '',
+      'Thank you, ' + firstName(o) + '. We have received your payment and your ' + p.short + ' order is confirmed.', '',
       'Order number: ' + ref(o), 'Item: ' + p.name, 'Quantity: 1', 'Amount paid: ' + rupees(o.amount_paise),
       o.razorpay_payment_id ? 'Payment ID: ' + o.razorpay_payment_id : '', '',
       'Delivering to:', o.name, o.address, o.city + ', ' + o.state + ' — ' + o.pin, 'Phone: ' + o.phone, '',
-      'Track your order: ' + track, 'Start building on screen today: ' + kit, '',
+      'Track your order: ' + track, page ? page[0] + ': ' + page[1] : '', '',
       'Questions? Reply to this email and quote ' + ref(o) + '.']
   };
 }
@@ -342,7 +405,7 @@ export function shopRoutes(){
 
     const f = readBuyer(req.body);
     const bad = checkBuyer(f);
-    if (bad) return res.status(400).json({ error: bad, code: 'invalid_details' });
+    if (bad) return res.status(400).json({ error: bad, code: PRODUCTS[f.product] ? 'invalid_details' : 'no_such_product' });
 
     /* a session, if one was sent, only LINKS the order — it is checked, never read */
     let user = null;
@@ -376,7 +439,7 @@ export function shopRoutes(){
       return res.json({
         orderId: order.id, ref: ref(order), razorpayOrderId: rzpOrder.id, keyId: payCore.keyId(),
         amount: Number(order.amount_paise), currency: order.currency || 'INR',
-        product: order.product, productName: (PRODUCTS[order.product] || {}).name || order.product,
+        product: order.product, productName: productOf(order.product).name,
         name: order.name, email: order.email, phone: order.phone,
         track: order.track_token || null
       });
