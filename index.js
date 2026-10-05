@@ -155,7 +155,8 @@ app.use(paymentRoutes());
    /api/webhooks/razorpay route above. */
 app.use(shopRoutes());
 console.log('shop: ' + (shopStatus().on ? 'on' : 'off') +
-  (shopStatus().email ? ', confirmation email on' : ', confirmation email OFF (no RESEND_API_KEY)'));
+  (shopStatus().email ? ', confirmation email on (from ' + shopStatus().from + ', replies to ' + shopStatus().replyTo + ')'
+                      : ', confirmation email OFF (no RESEND_API_KEY) — the buyer gets only Razorpay\'s own receipt'));
 {
   const p = paymentsStatus();
   console.log('payments: ' + (p.on ? ('on, ' + p.mode + ' mode' +
